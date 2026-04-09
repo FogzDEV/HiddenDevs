@@ -58,6 +58,7 @@ function HandleGuns.New(Tool: Tool)
 	local animator = humanoid:WaitForChild("Animator")
 	local track = animator:LoadAnimation(Tool.Shoot)
 	local idleTrack
+	self.Hum = humanoid
 	
 	if Tool:FindFirstChild("Idle") then
 		idleTrack = animator:LoadAnimation(Tool.Idle)
@@ -106,6 +107,7 @@ function HandleGuns:InitSingle()
 		
 		local hasAmmo = self:CheckAmmo()
 		if not hasAmmo then
+			self.Debounce = false
 			self:Reload()
 		else
 			self.CurrentAmmo -= 1
@@ -121,9 +123,10 @@ function HandleGuns:InitAuto()
 		con = runService.Heartbeat:Connect(function()
 			if self.Debounce then return end
 			self.Debounce = true
-
+			
 			local hasAmmo = self:CheckAmmo()
 			if not hasAmmo then
+				self.Debounce = false
 				self:Reload()
 			else
 				self.CurrentAmmo -= 1
@@ -168,6 +171,10 @@ function HandleGuns:CheckAmmo()
 end
 
 function HandleGuns:Shoot()
+	if self.Hum.Health <= 0 then
+		return
+	end
+	
 	local SfxClone = sounds:FindFirstChild("Shoot Fire"):Clone()
 	SfxClone.Parent = self.Tool.Handle
 	SfxClone:Play()
