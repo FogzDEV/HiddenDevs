@@ -1,0 +1,282 @@
+--SERVICES
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local serverStorage = game:GetService("ServerStorage")
+local players = game:GetService("Players")
+local debris = game:GetService("Debris")
+local tweenService = game:GetService("TweenService")
+local runService = game:GetService("RunService")
+
+--FOLDERS
+local events = replicatedStorage:FindFirstChild("Events")
+local sounds = serverStorage:FindFirstChild("Sounds")
+local models = serverStorage:FindFirstChild("Models")
+
+local HandleGuns = {}
+HandleGuns.__index = HandleGuns
+
+local CurrentGuns = {}
+
+--INFOS
+local GunsInfo = {
+	["Pistol"] = {
+		["Damage"] = 25,
+		["Ammo"] = 15,
+		["Cooldown"] = 0.5,
+		["Type"]= "Single",
+		["Spread"] = 0.5
+	},
+	["M4A1"] = {
+		["Damage"] = 35,
+		["Ammo"] = 30,
+		["Cooldown"] = 0.1,
+		["Type"]= "Auto",
+		["Spread"] = 0.5
+	}
+}
+
+function HandleGuns.New(Tool: Tool)
+	if not Tool:IsDescendantOf(players) then return end
+	
+	local self = setmetatable({}, HandleGuns)
+	
+	local gunInfo = GunsInfo[Tool.Name]
+	self.Tool = Tool
+	self.CooldownTime = gunInfo.Cooldown
+	self.Damage = gunInfo.Damage
+	self.Ammo = gunInfo.Ammo
+	self.CurrentAmmo = gunInfo.Ammo
+	self.Player = Tool.Parent.Parent
+	self.Debounce = false
+	
+	local bill = script.BillboardGui:Clone()
+	bill.Parent = Tool:WaitForChild("Handle")
+	bill.TextLabel.Text = self.CurrentAmmo .. "/" .. self.Ammo
+	self.Bill = bill
+	
+	local char = self.Player.Character or self.Player.CharacterAdded:Wait()
+	local humanoid = char:WaitForChild("Humanoid")
+	local animator = humanoid:WaitForChild("Animator")
+	local track = animator:LoadAnimation(Tool.Shoot)
+	local idleTrack
+	
+	if Tool:FindFirstChild("Idle") then
+		idleTrack = animator:LoadAnimation(Tool.Idle)
+	end
+	
+	self.Track = track
+	self.IdleTrack = idleTrack or nil
+	
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {self.Player.Character}
+	
+	self.RaycastParams = params
+	
+	if gunInfo.Type == "Single" or gunInfo.Type == "Shotgun"then
+		self:InitSingle()
+	elseif gunInfo.Type == "Auto" then
+		self:InitAuto()
+	end
+	
+	self:SetupAnims()
+	
+	CurrentGuns[Tool] = self
+	
+	return self
+end
+
+function HandleGuns:SetupAnims()
+	self.Tool.Equipped:Connect(function()
+		if self.IdleTrack then
+			self.IdleTrack:Play()
+		end
+	end)
+	
+	self.Tool.Unequipped:Connect(function()
+		if self.IdleTrack then
+			self.IdleTrack:Stop()
+		end
+	end)
+end
+
+function HandleGuns:InitSingle()
+	self.Tool.Activated:Connect(function()
+		if self.Debounce then return end
+		self.Debounce = true
+		
+		local hasAmmo = self:CheckAmmo()
+		if not hasAmmo then
+			self:Reload()
+		else
+			self.CurrentAmmo -= 1
+			self:Shoot()
+		end
+	end)
+end
+
+function HandleGuns:InitAuto()
+	local con
+	
+	self.Tool.Activated:Connect(function()
+		con = runService.Heartbeat:Connect(function()
+			if self.Debounce then return end
+			self.Debounce = true
+
+			local hasAmmo = self:CheckAmmo()
+			if not hasAmmo then
+				self:Reload()
+			else
+				self.CurrentAmmo -= 1
+				self:Shoot()
+			end
+		end)
+	end)
+	
+	local function clear()
+		if con then 
+			con:Disconnect()
+			con = nil
+		end
+	end
+	
+	self.Tool.Deactivated:Connect(function()
+		clear()
+	end)
+	
+	self.Tool.Unequipped:Connect(function()
+		clear()
+	end)
+end
+
+function HandleGuns:Reload()
+	if self.Debounce then return end
+	self.Debounce = true
+	
+	for i = 3, 1, -1 do
+		self.Bill.TextLabel.Text = "Reaload "..i
+		task.wait(1)
+	end
+	
+	self.CurrentAmmo = self.Ammo
+	self.Debounce = false
+	self.Bill.TextLabel.Text = self.CurrentAmmo .. "/" .. self.Ammo
+end
+
+function HandleGuns:CheckAmmo()
+	local currentAmmo = self.CurrentAmmo
+	return currentAmmo > 0
+end
+
+function HandleGuns:Shoot()
+	local SfxClone = sounds:FindFirstChild("Shoot Fire"):Clone()
+	SfxClone.Parent = self.Tool.Handle
+	SfxClone:Play()
+	debris:AddItem(SfxClone, 2)
+	
+	self.Track:Play()
+	
+	self.Bill.TextLabel.Text = self.CurrentAmmo .. "/" .. self.Ammo
+	
+	local vfx = script.ParticleEmitter:Clone()
+	vfx.Parent = self.Tool.Handle:FindFirstChildOfClass("Attachment")
+	task.delay(0.05, function() vfx:Emit(1) end)
+	game.Debris:AddItem(vfx, 1)
+	
+	local mousePosition = events.GetMouse:InvokeClient(self.Player)
+	local direction = (mousePosition - self.Tool.Handle.Position).Unit * 1000
+	local result = workspace:Raycast(self.Tool.Handle.Position, direction, self.RaycastParams)
+	local multiplier = 1
+	
+	local part = Instance.new("Part", workspace)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.Transparency = 1
+	
+	local pointLight = Instance.new("PointLight", self.Tool.Handle)
+	pointLight.Color = Color3.new(1, 0.615686, 0)
+	pointLight.Brightness = 5
+	game.Debris:AddItem(pointLight, 0.05)
+	
+	local at = Instance.new("Attachment", part)
+	game.Debris:AddItem(part, 0.5)
+	
+	local beam = models:FindFirstChild("Beam"):Clone()
+	beam.Parent = workspace
+	beam.Attachment0 = self.Tool.Handle:FindFirstChild("Attachment")
+	beam.Attachment1 = at
+	
+	tweenService:Create(beam, TweenInfo.new(0.1), {Width0 = 0.1, Width1 = 0.1}):Play()
+	task.delay(0.1, function()
+		tweenService:Create(beam, TweenInfo.new(0.1), {Width0 = 0, Width1 = 0}):Play()
+		debris:AddItem(beam, 0.1)
+	end)
+
+	if result then
+		part.CFrame = CFrame.new(result.Position)
+
+		local hitPart = result.Instance
+
+		if hitPart.Parent:FindFirstChild("Humanoid") then
+			if hitPart.Name == "Head" then
+				multiplier = 2
+			elseif hitPart.Name == "Torso" then
+				multiplier = 1
+			else
+				multiplier = 0.6
+			end
+		end
+		
+		local humanoid = result.Instance.Parent:FindFirstChild("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			humanoid:TakeDamage(self.Damage * multiplier)
+			
+			local part = models["Blood-07"]:Clone()
+			part.Parent = workspace
+			part.CFrame = CFrame.new(result.Position)
+			
+			for _, vfx in part:GetDescendants() do
+				task.delay(0.05, function()
+					if vfx:IsA("ParticleEmitter") then
+						vfx:Emit(vfx:GetAttribute("EmitCount"))
+					end
+				end)
+			end
+			
+			local SfxCloneHit = sounds:FindFirstChild("flesh_impact_bullet3"):Clone()
+			SfxCloneHit.Parent = self.Tool.Handle
+			SfxCloneHit:Play()
+			debris:AddItem(SfxCloneHit, 2)
+			
+			game.Debris:AddItem(part, 2)
+		else
+			local impact = models.Impact:Clone()
+			impact.Parent = result.Instance
+			impact.Concrete:Play()
+			impact.CFrame = CFrame.lookAt(result.Position, result.Position + result.Normal)
+			
+			task.delay(0.05, function()
+				impact.ParticleEmitter:Emit(20)
+			end)
+
+			game.Debris:AddItem(impact, 20)
+		end
+	else
+		local origin = self.Player.Character.HumanoidRootPart.Position
+		local direction = (mousePosition - origin).Unit
+		part.Position = origin + direction * 200
+	end
+	
+	task.wait(self.CooldownTime)
+	
+	self.Debounce = false
+end
+
+replicatedStorage.Events.Reload.OnServerEvent:Connect(function(plr, tool)
+	local toolTable = CurrentGuns[tool]
+	if toolTable then
+		toolTable:Reload()
+	end
+end)
+
+return HandleGuns
