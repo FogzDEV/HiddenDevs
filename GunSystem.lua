@@ -100,20 +100,24 @@ function HandleGuns:SetupAnims()
 	end)
 end
 
+function HandleGuns:ShootCheck()
+	if self.Debounce then return end
+	self.Debounce = true
+
+	local hasAmmo = self:CheckAmmo()
+	if not hasAmmo then
+		self.Debounce = false
+		self:Reload()
+	else
+		self.CurrentAmmo -= 1
+		self:Shoot()
+	end
+end
+
 --setup single shoot
 function HandleGuns:InitSingle()
 	self.Tool.Activated:Connect(function()
-		if self.Debounce then return end
-		self.Debounce = true
-		
-		local hasAmmo = self:CheckAmmo()
-		if not hasAmmo then
-			self.Debounce = false
-			self:Reload()
-		else
-			self.CurrentAmmo -= 1
-			self:Shoot()
-		end
+		self:ShootCheck()
 	end)
 end
 
@@ -123,17 +127,7 @@ function HandleGuns:InitAuto()
 	
 	self.Tool.Activated:Connect(function()
 		con = runService.Heartbeat:Connect(function()
-			if self.Debounce then return end
-			self.Debounce = true
-			
-			local hasAmmo = self:CheckAmmo()
-			if not hasAmmo then
-				self.Debounce = false
-				self:Reload()
-			else
-				self.CurrentAmmo -= 1
-				self:Shoot()
-			end
+			self:ShootCheck()
 		end)
 	end)
 	
