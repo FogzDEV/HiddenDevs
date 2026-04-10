@@ -14,7 +14,7 @@ local models = serverStorage:FindFirstChild("Models")
 local HandleGuns = {}
 HandleGuns.__index = HandleGuns
 
-local CurrentGuns = {}
+local CurrentGuns = {} -- for use with remote events
 
 --INFOS
 local GunsInfo = {
@@ -22,18 +22,17 @@ local GunsInfo = {
 		["Damage"] = 25,
 		["Ammo"] = 15,
 		["Cooldown"] = 0.5,
-		["Type"]= "Single",
-		["Spread"] = 0.5
+		["Type"]= "Single"
 	},
 	["M4A1"] = {
 		["Damage"] = 35,
 		["Ammo"] = 30,
 		["Cooldown"] = 0.1,
-		["Type"]= "Auto",
-		["Spread"] = 0.5
+		["Type"]= "Auto"
 	}
 }
 
+--Setup metatable
 function HandleGuns.New(Tool: Tool)
 	if not Tool:IsDescendantOf(players) then return end
 	
@@ -86,6 +85,7 @@ function HandleGuns.New(Tool: Tool)
 	return self
 end
 
+--setup animations
 function HandleGuns:SetupAnims()
 	self.Tool.Equipped:Connect(function()
 		if self.IdleTrack then
@@ -100,6 +100,7 @@ function HandleGuns:SetupAnims()
 	end)
 end
 
+--setup single shoot
 function HandleGuns:InitSingle()
 	self.Tool.Activated:Connect(function()
 		if self.Debounce then return end
@@ -116,6 +117,7 @@ function HandleGuns:InitSingle()
 	end)
 end
 
+--setup auto shoot
 function HandleGuns:InitAuto()
 	local con
 	
@@ -151,12 +153,13 @@ function HandleGuns:InitAuto()
 	end)
 end
 
+-- reload with debounce and billboard
 function HandleGuns:Reload()
-	if self.Debounce then return end
+	if self.Debounce or self.CurrentAmmo == self.Ammo then return end
 	self.Debounce = true
 	
 	for i = 3, 1, -1 do
-		self.Bill.TextLabel.Text = "Reaload "..i
+		self.Bill.TextLabel.Text = "Reload "..i
 		task.wait(1)
 	end
 	
@@ -170,6 +173,7 @@ function HandleGuns:CheckAmmo()
 	return currentAmmo > 0
 end
 
+--shoot with verification health, debounce
 function HandleGuns:Shoot()
 	if self.Hum.Health <= 0 then
 		return
@@ -218,7 +222,7 @@ function HandleGuns:Shoot()
 		tweenService:Create(beam, TweenInfo.new(0.1), {Width0 = 0, Width1 = 0}):Play()
 		debris:AddItem(beam, 0.1)
 	end)
-
+	
 	if result then
 		part.CFrame = CFrame.new(result.Position)
 
