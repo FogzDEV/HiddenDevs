@@ -1,287 +1,251 @@
---SERVICES
-local replicatedStorage = game:GetService("ReplicatedStorage")
+--Services and variables
 local serverStorage = game:GetService("ServerStorage")
-local players = game:GetService("Players")
-local debris = game:GetService("Debris")
-local tweenService = game:GetService("TweenService")
 local runService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local configs = serverStorage.Configs
+local infoZombies = require(configs.ConfigZombies)
+local MAXUPDATETIME = 0.5
 
---FOLDERS
-local events = replicatedStorage:FindFirstChild("Events")
-local sounds = serverStorage:FindFirstChild("Sounds")
-local models = serverStorage:FindFirstChild("Models")
+--Params
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Include
+raycastParams.FilterDescendantsInstances = {workspace.Map} -- Only raycast on map
 
-local HandleGuns = {}
-HandleGuns.__index = HandleGuns
+local overlapParams = OverlapParams.new()
+overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+overlapParams.FilterDescendantsInstances = {workspace.Enemies}
 
-local CurrentGuns = {} -- for use with remote events
-
---INFOS
-local GunsInfo = {
-	["Pistol"] = {
-		["Damage"] = 25,
-		["Ammo"] = 15,
-		["Cooldown"] = 0.5,
-		["Type"]= "Single"
-	},
-	["M4A1"] = {
-		["Damage"] = 35,
-		["Ammo"] = 30,
-		["Cooldown"] = 0.1,
-		["Type"]= "Auto"
-	}
+--Colors For Zombie
+local ZombieColors = {
+	[1] = Color3.new(0.05, 0.7, 0.3),
+	[2] = Color3.new(0.5, 0.9, 0.4),
+	[3] = Color3.new(0.1, 0.3, 0.2),
+	[4] = Color3.new(0.6, 0.2, 0.2),
+	[5] = Color3.new(0.2, 0.1, 0.6),
 }
 
---Setup metatable
-function HandleGuns.New(Tool: Tool)
-	if not Tool:IsDescendantOf(players) then return end
-	
-	local self = setmetatable({}, HandleGuns)
-	
-	local gunInfo = GunsInfo[Tool.Name]
-	self.Tool = Tool
-	self.CooldownTime = gunInfo.Cooldown
-	self.Damage = gunInfo.Damage
-	self.Ammo = gunInfo.Ammo
-	self.CurrentAmmo = gunInfo.Ammo
-	self.Player = Tool.Parent.Parent
-	self.Debounce = false
-	
-	local bill = script.BillboardGui:Clone()
-	bill.Parent = Tool:WaitForChild("Handle")
-	bill.TextLabel.Text = self.CurrentAmmo .. "/" .. self.Ammo
-	self.Bill = bill
-	
-	local char = self.Player.Character or self.Player.CharacterAdded:Wait()
-	local humanoid = char:WaitForChild("Humanoid")
-	local animator = humanoid:WaitForChild("Animator")
-	local track = animator:LoadAnimation(Tool.Shoot)
-	local idleTrack
-	self.Hum = humanoid
-	
-	if Tool:FindFirstChild("Idle") then
-		idleTrack = animator:LoadAnimation(Tool.Idle)
+local ZombieAI = {}
+ZombieAI.__index = ZombieAI
+
+--Tables for zombies and players
+local AliveZombies = {}
+local AlivePlayers = {} -- To avoid calling GetPlayers() all the time
+
+function ZombieAI:IsElite()
+	local n = math.random()
+	if n <= 0.1 then
+		local high = Instance.new("Highlight", self.Model)
+		high.FillColor = Color3.new(0.4, 0.164706, 1)
+		high.OutlineColor = Color3.new(1, 0.74902, 0)
+		self.Model:ScaleTo(2)
+		self.Humanoid.MaxHealth *= 2
+		self.Humanoid.Health = self.Humanoid.MaxHealth
+		self.Info.Damage *= 2
 	end
-	
-	self.Track = track
-	self.IdleTrack = idleTrack or nil
-	
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = {self.Player.Character}
-	
-	self.RaycastParams = params
-	
-	if gunInfo.Type == "Single" or gunInfo.Type == "Shotgun"then
-		self:InitSingle()
-	elseif gunInfo.Type == "Auto" then
-		self:InitAuto()
-	end
-	
-	self:SetupAnims()
-	
-	CurrentGuns[Tool] = self
-	
-	return self
 end
 
---setup animations
-function HandleGuns:SetupAnims()
-	self.Tool.Equipped:Connect(function()
-		if self.IdleTrack then
-			self.IdleTrack:Play()
+function ZombieAI:Raycast() --ray cast to check if there is a wall between zombie and player
+	local origin = self.PrimaryPart.Position + Vector3.new(0, -1.5, 0)
+	local direction = (self.TargetPosition - origin).Unit -- direction to the player
+	
+	local raycastResult = workspace:Raycast(origin, direction * 5, raycastParams)
+	
+	if not raycastResult then return end
+	
+	return true -- if true then there is a wall
+end
+
+function ZombieAI:Death() -- ragdoll system
+	self.Humanoid.Died:Once(function()
+		local function CreateAttachment(part, CFrame)
+			local attachment = Instance.new("Attachment")
+			attachment.Parent = part
+			attachment.CFrame = CFrame
+			return attachment
 		end
-	end)
-	
-	self.Tool.Unequipped:Connect(function()
-		if self.IdleTrack then
-			self.IdleTrack:Stop()
+		
+		local function CreateSocket(part, c0, c1)
+			local ballSocket = Instance.new("BallSocketConstraint")
+			ballSocket.Attachment0 = CreateAttachment(self.Model.Torso, c0)
+			ballSocket.Attachment1 = CreateAttachment(part, c1)
+			ballSocket.LimitsEnabled = true
+			ballSocket.Parent = self.Model.Torso
 		end
-	end)
-end
-
-function HandleGuns:ShootCheck()
-	if self.Debounce then return end
-	self.Debounce = true
-
-	local hasAmmo = self:CheckAmmo()
-	if not hasAmmo then
-		self.Debounce = false
-		self:Reload()
-	else
-		self.CurrentAmmo -= 1
-		self:Shoot()
-	end
-end
-
---setup single shoot
-function HandleGuns:InitSingle()
-	self.Tool.Activated:Connect(function()
-		self:ShootCheck()
-	end)
-end
-
---setup auto shoot
-function HandleGuns:InitAuto()
-	local con
-	
-	self.Tool.Activated:Connect(function()
-		con = runService.Heartbeat:Connect(function()
-			self:ShootCheck()
-		end)
-	end)
-	
-	local function clear()
-		if con then 
-			con:Disconnect()
-			con = nil
-		end
-	end
-	
-	self.Tool.Deactivated:Connect(function()
-		clear()
-	end)
-	
-	self.Tool.Unequipped:Connect(function()
-		clear()
-	end)
-end
-
--- reload with debounce and billboard
-function HandleGuns:Reload()
-	if self.Debounce or self.CurrentAmmo == self.Ammo then return end
-	self.Debounce = true
-	
-	for i = 3, 1, -1 do
-		self.Bill.TextLabel.Text = "Reload "..i
-		task.wait(1)
-	end
-	
-	self.CurrentAmmo = self.Ammo
-	self.Debounce = false
-	self.Bill.TextLabel.Text = self.CurrentAmmo .. "/" .. self.Ammo
-end
-
-function HandleGuns:CheckAmmo()
-	local currentAmmo = self.CurrentAmmo
-	return currentAmmo > 0
-end
-
---shoot with verification health, debounce
-function HandleGuns:Shoot()
-	if self.Hum.Health <= 0 then
-		return
-	end
-	
-	local SfxClone = sounds:FindFirstChild("Shoot Fire"):Clone()
-	SfxClone.Parent = self.Tool.Handle
-	SfxClone:Play()
-	debris:AddItem(SfxClone, 2)
-	
-	self.Track:Play()
-	
-	self.Bill.TextLabel.Text = self.CurrentAmmo .. "/" .. self.Ammo
-	
-	local vfx = script.ParticleEmitter:Clone()
-	vfx.Parent = self.Tool.Handle:FindFirstChildOfClass("Attachment")
-	task.delay(0.05, function() vfx:Emit(1) end)
-	game.Debris:AddItem(vfx, 1)
-	
-	local mousePosition = events.GetMouse:InvokeClient(self.Player)
-	local direction = (mousePosition - self.Tool.Handle.Position).Unit * 1000
-	local result = workspace:Raycast(self.Tool.Handle.Position, direction, self.RaycastParams)
-	local multiplier = 1
-	
-	local part = Instance.new("Part", workspace)
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.Transparency = 1
-	
-	local pointLight = Instance.new("PointLight", self.Tool.Handle)
-	pointLight.Color = Color3.new(1, 0.615686, 0)
-	pointLight.Brightness = 5
-	game.Debris:AddItem(pointLight, 0.05)
-	
-	local at = Instance.new("Attachment", part)
-	game.Debris:AddItem(part, 0.5)
-	
-	local beam = models:FindFirstChild("Beam"):Clone()
-	beam.Parent = workspace
-	beam.Attachment0 = self.Tool.Handle:FindFirstChild("Attachment")
-	beam.Attachment1 = at
-	
-	tweenService:Create(beam, TweenInfo.new(0.1), {Width0 = 0.1, Width1 = 0.1}):Play()
-	task.delay(0.1, function()
-		tweenService:Create(beam, TweenInfo.new(0.1), {Width0 = 0, Width1 = 0}):Play()
-		debris:AddItem(beam, 0.1)
-	end)
-	
-	if result then
-		part.CFrame = CFrame.new(result.Position)
-
-		local hitPart = result.Instance
-
-		if hitPart.Parent:FindFirstChild("Humanoid") then
-			if hitPart.Name == "Head" then
-				multiplier = 2
-			elseif hitPart.Name == "Torso" then
-				multiplier = 1
-			else
-				multiplier = 0.6
+		
+		for _, v in self.Model.Torso:GetChildren() do
+			if v:IsA("Motor6D") and v.Name ~= "Neck" then
+				CreateSocket(v.Part1, v.C0, v.C1)
+				v:Destroy()
 			end
 		end
 		
-		local humanoid = result.Instance.Parent:FindFirstChild("Humanoid")
-		if humanoid and humanoid.Health > 0 then
-			humanoid:TakeDamage(self.Damage * multiplier)
-			
-			local part = models["Blood-07"]:Clone()
-			part.Parent = workspace
-			part.CFrame = CFrame.new(result.Position)
-			
-			for _, vfx in part:GetDescendants() do
-				task.delay(0.05, function()
-					if vfx:IsA("ParticleEmitter") then
-						vfx:Emit(vfx:GetAttribute("EmitCount"))
-					end
-				end)
-			end
-			
-			local SfxCloneHit = sounds:FindFirstChild("flesh_impact_bullet3"):Clone()
-			SfxCloneHit.Parent = self.Tool.Handle
-			SfxCloneHit:Play()
-			debris:AddItem(SfxCloneHit, 2)
-			
-			game.Debris:AddItem(part, 2)
-		else
-			local impact = models.Impact:Clone()
-			impact.Parent = result.Instance
-			impact.Concrete:Play()
-			impact.CFrame = CFrame.lookAt(result.Position, result.Position + result.Normal)
-			
-			task.delay(0.05, function()
-				impact.ParticleEmitter:Emit(20)
-			end)
-
-			game.Debris:AddItem(impact, 20)
-		end
-	else
-		local origin = self.Player.Character.HumanoidRootPart.Position
-		local direction = (mousePosition - origin).Unit
-		part.Position = origin + direction * 200
-	end
-	
-	task.wait(self.CooldownTime)
-	
-	self.Debounce = false
+		self:PlaySound("Die")
+		
+		game.Debris:AddItem(self.Model, 5)
+	end)
 end
 
-replicatedStorage.Events.Reload.OnServerEvent:Connect(function(plr, tool)
-	local toolTable = CurrentGuns[tool]
-	if toolTable then
-		toolTable:Reload()
+function ZombieAI:Damaged()
+	self.Humanoid.HealthChanged:Connect(function(health)
+		if health < self.CurrentHealth then
+			self.Animations["Damaged"]:Play()
+			self:PlaySound("Damaged")
+		end
+		self.CurrentHealth = health
+	end)
+end
+
+function ZombieAI:SetupAnimations() -- setup animations and state animations
+	for _, anim in script.Animations:GetChildren() do
+		local track = self.Humanoid:FindFirstChildOfClass("Animator"):LoadAnimation(anim)
+		self.Animations[anim.Name] = track
+	end
+	
+	self.Humanoid.StateChanged:Connect(function(old, new)
+		if not self.Animations[new.Name] then return end
+		self.Animations[new.Name]:Play()
+		if self.Animations[old.Name] then
+			self.Animations[old.Name]:Stop()
+		end
+	end)
+end
+
+function ZombieAI:PlaySound(State)
+	local folder = serverStorage.Sounds:FindFirstChild(State)
+	if not folder then return end
+	
+	local sound = folder:GetChildren()[math.random(1, #folder:GetChildren())]:Clone()
+	sound.Parent = self.PrimaryPart
+	sound:Play()
+	game.Debris:AddItem(sound, sound.TimeLength * 1.5)
+end
+
+function ZombieAI:Setup() -- Setup zombie Infos: Health, WalkSpeed, Damage and Colors
+	self.Humanoid.MaxHealth = self.Info.Health
+	self.Humanoid.Health = self.Info.Health
+	self.Humanoid.WalkSpeed = self.Info.Speed	
+	self.Humanoid.BreakJointsOnDeath = false
+	self.Humanoid.RequiresNeck = false
+	
+	local bodyColors = self.Model:FindFirstChildOfClass("BodyColors")
+	local color = ZombieColors[math.random(1, #ZombieColors)]
+
+	for i,v in ipairs({"Head","LeftArm","RightArm"}) do -- A for loop with parts that I want to change the color of
+		bodyColors[v.."Color3"] = color
+	end
+	
+	self:SetupAnimations()
+	self:Death()
+	self:Damaged()
+	self:PlaySound("Spawn")
+	self:IsElite()
+	
+	table.insert(AliveZombies, self)
+end
+
+function ZombieAI:FindTarget() -- Find the closest player and set target
+	local NearestTarget
+	local NearestDistance = math.huge
+	local NearestPos 
+	
+	for _, plr in ipairs(AlivePlayers) do
+		local char = plr.Character
+		if not char then continue end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then continue end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local plrDistance = (hrp.Position - self.PrimaryPart.Position).Magnitude
+		if hum and hum.Health > 0 and plrDistance < NearestDistance then
+			NearestTarget = plr
+			NearestDistance = plrDistance
+			local offset = 5 * (plrDistance / 10) -- to avoid pathfinding and add some variation to the movement, making it walk slightly to the sides
+			NearestPos = hrp.Position + Vector3.new(math.random(-offset, offset), 0, math.random(-offset, offset)) -- random offset
+		end
+	end
+	
+	if NearestTarget then
+		self.Target = NearestTarget
+		self.TargetPosition = NearestPos
+		self.Distance = NearestDistance
+		self:MoveToTarget()
+	end
+end
+
+function ZombieAI:Attack() -- Damage player
+	if os.clock() - self.LastAttack <= 1 then
+		return
+	end
+	
+	self.LastAttack = os.clock() -- update debounce
+	
+	local Origin = self.PrimaryPart.CFrame
+	local parts = workspace:GetPartBoundsInBox(Origin, Vector3.new(10, 10, 10), overlapParams) -- hitbox
+	
+	local victins = {} -- save the players that already got hit
+	
+	for _, part in parts do -- hit box parts
+		local Vhumanoid = part.Parent:FindFirstChildOfClass("Humanoid")
+		if not Vhumanoid or Vhumanoid.Health <= 0 or victins[Vhumanoid] then continue end
+		Vhumanoid:TakeDamage(5)
+		victins[Vhumanoid] = true
+	end
+	
+	self:PlaySound("Attack")
+	self.Animations["Attack"]:Play()
+end
+
+function ZombieAI:MoveToTarget() -- Move to Target
+	self.Humanoid:MoveTo(self.TargetPosition)
+	local needJump = self:Raycast() -- check if need jump
+	if needJump then
+		self.Humanoid.Jump = true -- jump if raycast hit something
+	end
+	
+	if self.Distance <= 5 then -- Attack Check
+		self:Attack()
+	end
+end
+
+function ZombieAI.New(zombie) -- Setup Zombie MetaTable
+	local ZombieInfo = setmetatable({}, ZombieAI)
+	ZombieInfo.Model = zombie
+	ZombieInfo.PrimaryPart = zombie.PrimaryPart
+	ZombieInfo.Info = infoZombies[zombie.Name] -- get all zombie infos (like health, speed, etc)
+	ZombieInfo.Humanoid = zombie:FindFirstChildOfClass("Humanoid")
+	ZombieInfo.LastPathUpdate = os.clock()
+	ZombieInfo.LastAttack = os.clock()
+	ZombieInfo.CurrentHealth = zombie.Humanoid.Health
+	ZombieInfo.Animations = {}
+	
+	ZombieInfo:Setup()
+	
+	return ZombieInfo
+end
+
+runService.Heartbeat:Connect(function()
+	for i = #AliveZombies, 1, -1 do
+		local zombie = AliveZombies[i]
+		if not zombie.Model or zombie.Humanoid.Health <= 0 then
+			table.remove(AliveZombies, i) -- clear zombie if not exist or dead
+			continue
+		end
+
+		if os.clock() - zombie.LastPathUpdate >= MAXUPDATETIME then -- debounce
+			zombie:FindTarget()
+			zombie.LastPathUpdate = os.clock() -- update last path update
+		end
 	end
 end)
 
-return HandleGuns
+--Setup Players
+game.Players.PlayerAdded:Connect(function(plr)
+	plr.CharacterAdded:Connect(function(char)
+		table.insert(AlivePlayers, plr)
+	end)
+end)
+
+game.Players.PlayerRemoving:Connect(function(plr)
+	table.remove(AlivePlayers, table.find(AlivePlayers, plr))
+end)
+
+return ZombieAI
