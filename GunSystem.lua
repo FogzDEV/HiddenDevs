@@ -1,251 +1,375 @@
---Services and Variables
-local serverStorage = game:GetService("ServerStorage")
-local runService = game:GetService("RunService")
+--// SERVICES
+-- Services are cached once to avoid repeated global lookups which are slower.
+local ServerStorage = game:GetService("ServerStorage")
+local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
-local configs = serverStorage.Configs
+local Debris = game:GetService("Debris")
+
+--// MODULE CONFIG
+-- Centralized zombie configuration table containing stats like
+-- health, speed and damage for each zombie type.
+local configs = ServerStorage.Configs
 local infoZombies = require(configs.ConfigZombies)
+
+-- AI update interval.
+-- Instead of recalculating targets every frame (which would scale poorly),
+-- zombies update their target every 0.5 seconds.
 local MAXUPDATETIME = 0.5
 
---Params
+-- Random object used instead of math.random()
+-- This is the recommended Roblox approach for deterministic RNG.
+local rng = Random.new()
+
+--// RAYCAST PARAMETERS
+-- Raycast only interacts with map geometry to detect obstacles
+-- between the zombie and its target.
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Include
-raycastParams.FilterDescendantsInstances = {workspace.Map} -- Only raycast on map
+raycastParams.FilterDescendantsInstances = {workspace.Map}
 
+--// OVERLAP PARAMETERS
+-- Used for melee hit detection. We exclude enemies to prevent zombies
+-- from damaging each other when their hitboxes overlap.
 local overlapParams = OverlapParams.new()
 overlapParams.FilterType = Enum.RaycastFilterType.Exclude
 overlapParams.FilterDescendantsInstances = {workspace.Enemies}
 
---Colors For Zombie
+--// ZOMBIE COLOR VARIATIONS
+-- Cosmetic color randomization to add visual variety to zombies.
 local ZombieColors = {
-	[1] = Color3.new(0.05, 0.7, 0.3),
-	[2] = Color3.new(0.5, 0.9, 0.4),
-	[3] = Color3.new(0.1, 0.3, 0.2),
-	[4] = Color3.new(0.6, 0.2, 0.2),
-	[5] = Color3.new(0.2, 0.1, 0.6),
+	Color3.new(0.05,0.7,0.3),
+	Color3.new(0.5,0.9,0.4),
+	Color3.new(0.1,0.3,0.2),
+	Color3.new(0.6,0.2,0.2),
+	Color3.new(0.2,0.1,0.6),
 }
 
 local ZombieAI = {}
 ZombieAI.__index = ZombieAI
 
---Tables for zombies and players
+-- Cached tables to avoid expensive operations during runtime.
+-- Player:GetPlayers() allocations are avoided entirely.
 local AliveZombies = {}
-local AlivePlayers = {} -- To avoid calling GetPlayers() all the time
+local AlivePlayers = {}
 
+--// ELITE ZOMBIE
+-- Small chance for a zombie to spawn as an elite variant.
+-- Elite zombies are stronger and visually highlighted.
 function ZombieAI:IsElite()
-	local n = math.random()
-	if n <= 0.1 then
-		local high = Instance.new("Highlight", self.Model)
-		high.FillColor = Color3.new(0.4, 0.164706, 1)
-		high.OutlineColor = Color3.new(1, 0.74902, 0)
+	if rng:NextNumber() <= 0.1 then
+		local highlight = Instance.new("Highlight")
+		highlight.FillColor = Color3.new(0.4,0.16,1)
+		highlight.OutlineColor = Color3.new(1,0.74,0)
+		highlight.Parent = self.Model
+
 		self.Model:ScaleTo(2)
+
 		self.Humanoid.MaxHealth *= 2
 		self.Humanoid.Health = self.Humanoid.MaxHealth
+
 		self.Info.Damage *= 2
 	end
 end
 
-function ZombieAI:Raycast() --ray cast to check if there is a wall between zombie and player
-	local origin = self.PrimaryPart.Position + Vector3.new(0, -1.5, 0)
-	local direction = (self.TargetPosition - origin).Unit -- direction to the player
-	
-	local raycastResult = workspace:Raycast(origin, direction * 5, raycastParams)
-	
-	if not raycastResult then return end
-	
-	return true -- if true then there is a wall
+--// OBSTACLE DETECTION
+-- Detects if geometry is blocking the zombie's path toward the target.
+-- If an obstacle is detected, the zombie attempts to jump.
+function ZombieAI:Raycast()
+	local origin = self.PrimaryPart.Position + Vector3.new(0,-1.5,0)
+	local direction = (self.TargetPosition - origin).Unit
+
+	local result = workspace:Raycast(origin, direction * 6, raycastParams)
+
+	return result ~= nil
 end
 
-function ZombieAI:Death() -- ragdoll system
+--// RAGDOLL SYSTEM
+-- Converts Motor6D joints to BallSocketConstraints when the zombie dies.
+-- This produces a physics-based ragdoll effect instead of Roblox's
+-- default joint breaking behavior.
+function ZombieAI:Death()
+
 	self.Humanoid.Died:Once(function()
-		local function CreateAttachment(part, CFrame)
-			local attachment = Instance.new("Attachment")
-			attachment.Parent = part
-			attachment.CFrame = CFrame
-			return attachment
+
+		local function createAttachment(part,cframe)
+			local att = Instance.new("Attachment")
+			att.CFrame = cframe
+			att.Parent = part
+			return att
 		end
-		
-		local function CreateSocket(part, c0, c1)
-			local ballSocket = Instance.new("BallSocketConstraint")
-			ballSocket.Attachment0 = CreateAttachment(self.Model.Torso, c0)
-			ballSocket.Attachment1 = CreateAttachment(part, c1)
-			ballSocket.LimitsEnabled = true
-			ballSocket.Parent = self.Model.Torso
+
+		local function createSocket(part,c0,c1)
+			local socket = Instance.new("BallSocketConstraint")
+
+			socket.Attachment0 = createAttachment(self.Model.Torso,c0)
+			socket.Attachment1 = createAttachment(part,c1)
+
+			socket.LimitsEnabled = true
+			socket.Parent = self.Model.Torso
 		end
-		
-		for _, v in self.Model.Torso:GetChildren() do
-			if v:IsA("Motor6D") and v.Name ~= "Neck" then
-				CreateSocket(v.Part1, v.C0, v.C1)
-				v:Destroy()
+
+		for _,motor in self.Model.Torso:GetChildren() do
+			if motor:IsA("Motor6D") and motor.Name ~= "Neck" then
+				createSocket(motor.Part1,motor.C0,motor.C1)
+				motor:Destroy()
 			end
 		end
-		
+
 		self:PlaySound("Die")
-		
-		game.Debris:AddItem(self.Model, 5)
+
+		Debris:AddItem(self.Model,5)
 	end)
+
 end
 
+--// DAMAGE REACTION
+-- Tracks health changes to trigger damage animations and sounds.
 function ZombieAI:Damaged()
+
 	self.Humanoid.HealthChanged:Connect(function(health)
+
 		if health < self.CurrentHealth then
 			self.Animations["Damaged"]:Play()
 			self:PlaySound("Damaged")
 		end
+
 		self.CurrentHealth = health
+
 	end)
+
 end
 
-function ZombieAI:SetupAnimations() -- setup animations and state animations
-	for _, anim in script.Animations:GetChildren() do
-		local track = self.Humanoid:FindFirstChildOfClass("Animator"):LoadAnimation(anim)
+--// ANIMATION SETUP
+-- Loads all animations once during initialization and stores them
+-- in a lookup table for fast access during runtime.
+function ZombieAI:SetupAnimations()
+
+	local animator = self.Humanoid:FindFirstChildOfClass("Animator")
+
+	for _,anim in script.Animations:GetChildren() do
+		local track = animator:LoadAnimation(anim)
 		self.Animations[anim.Name] = track
 	end
-	
-	self.Humanoid.StateChanged:Connect(function(old, new)
-		if not self.Animations[new.Name] then return end
-		self.Animations[new.Name]:Play()
-		if self.Animations[old.Name] then
-			self.Animations[old.Name]:Stop()
+
+	self.Humanoid.StateChanged:Connect(function(old,new)
+
+		local newAnim = self.Animations[new.Name]
+		if not newAnim then return end
+
+		newAnim:Play()
+
+		local oldAnim = self.Animations[old.Name]
+		if oldAnim then
+			oldAnim:Stop()
 		end
+
 	end)
+
 end
 
-function ZombieAI:PlaySound(State)
-	local folder = serverStorage.Sounds:FindFirstChild(State)
+--// SOUND PLAYER
+-- Randomly selects a sound from a folder and plays it on the zombie.
+function ZombieAI:PlaySound(state)
+
+	local folder = ServerStorage.Sounds:FindFirstChild(state)
 	if not folder then return end
-	
-	local sound = folder:GetChildren()[math.random(1, #folder:GetChildren())]:Clone()
+
+	local sounds = folder:GetChildren()
+	if #sounds == 0 then return end
+
+	local sound = sounds[rng:NextInteger(1,#sounds)]:Clone()
 	sound.Parent = self.PrimaryPart
 	sound:Play()
-	game.Debris:AddItem(sound, sound.TimeLength * 1.5)
+
+	Debris:AddItem(sound,sound.TimeLength * 1.5)
+
 end
 
-function ZombieAI:Setup() -- Setup zombie Infos: Health, WalkSpeed, Damage and Colors
+--// INITIAL SETUP
+function ZombieAI:Setup()
+
 	self.Humanoid.MaxHealth = self.Info.Health
 	self.Humanoid.Health = self.Info.Health
-	self.Humanoid.WalkSpeed = self.Info.Speed	
+	self.Humanoid.WalkSpeed = self.Info.Speed
+
 	self.Humanoid.BreakJointsOnDeath = false
 	self.Humanoid.RequiresNeck = false
-	
-	local bodyColors = self.Model:FindFirstChildOfClass("BodyColors")
-	local color = ZombieColors[math.random(1, #ZombieColors)]
 
-	for i,v in ipairs({"Head","LeftArm","RightArm"}) do -- A for loop with parts that I want to change the color of
-		bodyColors[v.."Color3"] = color
+	local bodyColors = self.Model:FindFirstChildOfClass("BodyColors")
+	local color = ZombieColors[rng:NextInteger(1,#ZombieColors)]
+
+	for _,part in {"Head","LeftArm","RightArm"} do
+		bodyColors[part.."Color3"] = color
 	end
-	
+
 	self:SetupAnimations()
 	self:Death()
 	self:Damaged()
+
 	self:PlaySound("Spawn")
 	self:IsElite()
-	
-	table.insert(AliveZombies, self)
+
+	table.insert(AliveZombies,self)
+
 end
 
-function ZombieAI:FindTarget() -- Find the closest player and set target
-	local NearestTarget
-	local NearestDistance = math.huge
-	local NearestPos 
-	
-	for _, plr in ipairs(AlivePlayers) do
+--// TARGET ACQUISITION
+-- Searches for the nearest valid player humanoid.
+-- Uses the cached AlivePlayers table instead of Players:GetPlayers()
+-- which prevents frequent memory allocations.
+function ZombieAI:FindTarget()
+
+	local nearest
+	local nearestDistance = math.huge
+	local nearestPos
+
+	for _,plr in AlivePlayers do
+
 		local char = plr.Character
 		if not char then continue end
+
 		local hrp = char:FindFirstChild("HumanoidRootPart")
-		if not hrp then continue end
 		local hum = char:FindFirstChildOfClass("Humanoid")
-		local plrDistance = (hrp.Position - self.PrimaryPart.Position).Magnitude
-		if hum and hum.Health > 0 and plrDistance < NearestDistance then
-			NearestTarget = plr
-			NearestDistance = plrDistance
-			local offset = 5 * (plrDistance / 10) -- to avoid pathfinding and add some variation to the movement, making it walk slightly to the sides
-			NearestPos = hrp.Position + Vector3.new(math.random(-offset, offset), 0, math.random(-offset, offset)) -- random offset
+
+		if not hrp or not hum or hum.Health <= 0 then continue end
+
+		local dist = (hrp.Position - self.PrimaryPart.Position).Magnitude
+
+		if dist < nearestDistance then
+
+			nearest = plr
+			nearestDistance = dist
+
+			local offset = 5 * (dist/10)
+
+			nearestPos = hrp.Position + Vector3.new(
+				rng:NextNumber(-offset,offset),
+				0,
+				rng:NextNumber(-offset,offset)
+			)
+
 		end
 	end
-	
-	if NearestTarget then
-		self.Target = NearestTarget
-		self.TargetPosition = NearestPos
-		self.Distance = NearestDistance
+
+	if nearest then
+		self.Target = nearest
+		self.TargetPosition = nearestPos
+		self.Distance = nearestDistance
 		self:MoveToTarget()
 	end
+
 end
 
-function ZombieAI:Attack() -- Damage player
+--// ATTACK SYSTEM
+-- Uses spatial queries instead of .Touched events.
+-- This is more reliable and avoids physics event overhead.
+function ZombieAI:Attack()
+
 	if os.clock() - self.LastAttack <= 1 then
 		return
 	end
-	
-	self.LastAttack = os.clock() -- update debounce
-	
-	local Origin = self.PrimaryPart.CFrame
-	local parts = workspace:GetPartBoundsInBox(Origin, Vector3.new(10, 10, 10), overlapParams) -- hitbox
-	
-	local victins = {} -- save the players that already got hit
-	
-	for _, part in parts do -- hit box parts
-		local Vhumanoid = part.Parent:FindFirstChildOfClass("Humanoid")
-		if not Vhumanoid or Vhumanoid.Health <= 0 or victins[Vhumanoid] then continue end
-		Vhumanoid:TakeDamage(5)
-		victins[Vhumanoid] = true
+
+	self.LastAttack = os.clock()
+
+	local origin = self.PrimaryPart.CFrame
+
+	local parts = workspace:GetPartBoundsInBox(origin,Vector3.new(10,10,10),overlapParams)
+
+	local victims = {}
+
+	for _,part in parts do
+
+		local hum = part.Parent:FindFirstChildOfClass("Humanoid")
+
+		if not hum or hum.Health <= 0 or victims[hum] then continue end
+
+		hum:TakeDamage(self.Info.Damage)
+
+		victims[hum] = true
+
 	end
-	
+
 	self:PlaySound("Attack")
 	self.Animations["Attack"]:Play()
+
 end
 
-function ZombieAI:MoveToTarget() -- Move to Target
+--// MOVEMENT
+function ZombieAI:MoveToTarget()
+
 	self.Humanoid:MoveTo(self.TargetPosition)
-	local needJump = self:Raycast() -- check if need jump
-	if needJump then
-		self.Humanoid.Jump = true -- jump if raycast hit something
+
+	if self:Raycast() then
+		self.Humanoid.Jump = true
 	end
-	
-	if self.Distance <= 5 then -- Attack Check
+
+	if self.Distance <= 5 then
 		self:Attack()
 	end
+
 end
 
-function ZombieAI.New(zombie) -- Setup Zombie MetaTable
-	local ZombieInfo = setmetatable({}, ZombieAI)
-	ZombieInfo.Model = zombie
-	ZombieInfo.PrimaryPart = zombie.PrimaryPart
-	ZombieInfo.Info = infoZombies[zombie.Name] -- get all zombie infos (like health, speed, etc)
-	ZombieInfo.Humanoid = zombie:FindFirstChildOfClass("Humanoid")
-	ZombieInfo.LastPathUpdate = os.clock()
-	ZombieInfo.LastAttack = os.clock()
-	ZombieInfo.CurrentHealth = zombie.Humanoid.Health
-	ZombieInfo.Animations = {}
-	
-	ZombieInfo:Setup()
-	
-	return ZombieInfo
+--// CONSTRUCTOR
+function ZombieAI.New(zombie)
+
+	local self = setmetatable({},ZombieAI)
+
+	self.Model = zombie
+	self.PrimaryPart = zombie.PrimaryPart
+	self.Info = infoZombies[zombie.Name]
+
+	self.Humanoid = zombie:FindFirstChildOfClass("Humanoid")
+
+	self.LastPathUpdate = os.clock()
+	self.LastAttack = os.clock()
+
+	self.CurrentHealth = zombie.Humanoid.Health
+
+	self.Animations = {}
+
+	self:Setup()
+
+	return self
+
 end
 
-runService.Heartbeat:Connect(function()
-	for i = #AliveZombies, 1, -1 do
+--// MAIN AI LOOP
+RunService.Heartbeat:Connect(function()
+
+	for i = #AliveZombies,1,-1 do
+
 		local zombie = AliveZombies[i]
+
 		if not zombie.Model or zombie.Humanoid.Health <= 0 then
-			table.remove(AliveZombies, i) -- clear zombie if not exist or dead
+			table.remove(AliveZombies,i)
 			continue
 		end
 
-		if os.clock() - zombie.LastPathUpdate >= MAXUPDATETIME then -- debounce
+		if os.clock() - zombie.LastPathUpdate >= MAXUPDATETIME then
 			zombie:FindTarget()
-			zombie.LastPathUpdate = os.clock() -- update last path update
+			zombie.LastPathUpdate = os.clock()
 		end
+
 	end
+
 end)
 
---Setup Players
-game.Players.PlayerAdded:Connect(function(plr)
-	plr.CharacterAdded:Connect(function(char)
-		table.insert(AlivePlayers, plr)
-	end)
+--// PLAYER CACHE SYSTEM
+Players.PlayerAdded:Connect(function(plr)
+
+	if not table.find(AlivePlayers,plr) then
+		table.insert(AlivePlayers,plr)
+	end
+
 end)
 
-game.Players.PlayerRemoving:Connect(function(plr)
-	table.remove(AlivePlayers, table.find(AlivePlayers, plr))
+Players.PlayerRemoving:Connect(function(plr)
+
+	local index = table.find(AlivePlayers,plr)
+	if index then
+		table.remove(AlivePlayers,index)
+	end
+
 end)
 
 return ZombieAI
