@@ -34,7 +34,7 @@ ZombieAI.__index = ZombieAI
 local AliveZombies = {}
 
 --- Checks if the zombie spawns as an "Elite" variant with buffed stats
-function ZombieAI:IsElite()
+function ZombieAI:CheckIsElite()
 	local n = math.random()
 	if n <= 0.01 then -- 1% chance
 		local high = Instance.new("Highlight")
@@ -43,7 +43,7 @@ function ZombieAI:IsElite()
 		high.FillTransparency = 0.5
 		high.DepthMode = Enum.HighlightDepthMode.Occluded
 		high.Parent = self.Model
-		
+
 		self.Model:ScaleTo(1.5)
 		self.Humanoid.MaxHealth *= 3
 		self.Humanoid.Health = self.Humanoid.MaxHealth
@@ -56,7 +56,7 @@ end
 function ZombieAI:CheckForObstacles()
 	local origin = self.PrimaryPart.Position + Vector3.new(0, -1, 0)
 	local direction = self.PrimaryPart.CFrame.LookVector * 4 -- Checks 4 studs ahead
-	
+
 	local raycastResult = workspace:Raycast(origin, direction, raycastParams)
 	return raycastResult ~= nil -- Returns true if a wall is detected
 end
@@ -64,14 +64,17 @@ end
 --- Handles the Ragdoll system and body cleanup upon death
 function ZombieAI:Death()
 	self.Humanoid.Died:Once(function()
+		if self.HealthCon then
+			self.HealthCon:Disconnect()
+		end
 		-- Disable states to prevent the physics engine from trying to "stand" the character up
 		self.Humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
-		
+
 		local function CreateSocket(part, c0, c1)
 			local ballSocket = Instance.new("BallSocketConstraint")
 			local att0 = Instance.new("Attachment", self.Model.Torso)
 			local att1 = Instance.new("Attachment", part)
-			
+
 			att0.CFrame = c0
 			att1.CFrame = c1
 			ballSocket.Attachment0 = att0
@@ -79,7 +82,7 @@ function ZombieAI:Death()
 			ballSocket.LimitsEnabled = true
 			ballSocket.Parent = self.Model.Torso
 		end
-		
+
 		-- Replace Motor6D joints with BallSockets for the Ragdoll effect
 		for _, v in self.Model:GetDescendants() do
 			if v:IsA("Motor6D") and v.Name ~= "Neck" then
@@ -87,7 +90,7 @@ function ZombieAI:Death()
 				v:Destroy()
 			end
 		end
-		
+
 		self:PlaySound("Die")
 		Debris:AddItem(self.Model, 10) -- Remove body after 10 seconds
 	end)
@@ -95,7 +98,7 @@ end
 
 --- Visual and sound feedback when the zombie takes damage
 function ZombieAI:Damaged()
-	self.Humanoid.HealthChanged:Connect(function(health)
+	self.HealthCon = self.Humanoid.HealthChanged:Connect(function(health)
 		if health < self.CurrentHealth and health > 0 then
 			if self.Animations["Damaged"] then self.Animations["Damaged"]:Play() end
 			self:PlaySound("Damaged")
@@ -107,11 +110,11 @@ end
 --- Preloads animations and manages state-based playback
 function ZombieAI:SetupAnimations()
 	local animator = self.Humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", self.Humanoid)
-	
+
 	for _, anim in script.Animations:GetChildren() do
 		self.Animations[anim.Name] = animator:LoadAnimation(anim)
 	end
-	
+
 	-- Automatically play/stop animations based on Humanoid State
 	self.Humanoid.StateChanged:Connect(function(old, new)
 		if self.Animations[new.Name] then
@@ -127,7 +130,7 @@ end
 function ZombieAI:PlaySound(state)
 	local folder = serverStorage.Sounds:FindFirstChild(state)
 	if not folder then return end
-	
+
 	local sounds = folder:GetChildren()
 	local sound = sounds[math.random(1, #sounds)]:Clone()
 	sound.Parent = self.PrimaryPart
@@ -137,11 +140,12 @@ end
 
 --- Initial configuration of attributes and appearance
 function ZombieAI:Setup()
+	if not self.Humanoid or not self.Model.PrimaryPart then return end
 	self.Humanoid.MaxHealth = self.Info.Health
 	self.Humanoid.Health = self.Info.Health
 	self.Humanoid.WalkSpeed = self.Info.Speed	
 	self.Humanoid.BreakJointsOnDeath = false
-	
+
 	-- Apply random colors to specific body parts
 	local bodyColors = self.Model:FindFirstChildOfClass("BodyColors")
 	if bodyColors then
@@ -150,13 +154,13 @@ function ZombieAI:Setup()
 			bodyColors[partName] = color
 		end
 	end
-	
+
 	self:SetupAnimations()
 	self:Death()
 	self:Damaged()
-	self:IsElite()
+	self:CheckIsElite()
 	self:PlaySound("Spawn")
-	
+
 	table.insert(AliveZombies, self) -- Add to the tracking table
 end
 
@@ -164,11 +168,11 @@ end
 function ZombieAI:FindTarget()
 	local nearestTarget = nil
 	local shortestDistance = math.huge
-	
+
 	for _, plr in Players:GetPlayers() do
 		local char = plr.Character
 		if not char or not char:FindFirstChild("HumanoidRootPart") then continue end
-		
+
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum and hum.Health > 0 then
 			local dist = (char.HumanoidRootPart.Position - self.PrimaryPart.Position).Magnitude
@@ -178,15 +182,15 @@ function ZombieAI:FindTarget()
 			end
 		end
 	end
-	
+
 	if nearestTarget then
 		self.Target = nearestTarget
 		self.Distance = shortestDistance
-		
+
 		-- Add a slight random offset to movement for a more natural look
 		local offset = Vector3.new(math.random(-2, 2), 0, math.random(-2, 2))
 		self.TargetPosition = nearestTarget.Position + offset
-		
+
 		self:MoveToTarget()
 	end
 end
@@ -194,11 +198,11 @@ end
 --- Handles area-of-effect (AoE) attack logic
 function ZombieAI:Attack()
 	if os.clock() - self.LastAttack < 1.5 then return end -- Attack debounce
-	
+
 	self.LastAttack = os.clock()
 	self:PlaySound("Attack")
 	if self.Animations["Attack"] then self.Animations["Attack"]:Play() end
-	
+
 	-- Delay the damage logic to sync with the animation's "impact" frame
 	task.delay(0.3, function()
 		local hitBoxPos = self.PrimaryPart.CFrame * CFrame.new(0, 0, -2)
@@ -217,13 +221,20 @@ end
 
 --- Commands the Humanoid to move and triggers jump/attack logic
 function ZombieAI:MoveToTarget()
-	self.Humanoid:MoveTo(self.TargetPosition)
+	if not self.Target:IsDescendantOf(workspace) then 
+		self.Humanoid:MoveTo(self.PrimaryPart.Position)
+		self.Animations["Idle"]:Play()
+		self.Animations["Running"]:Stop()
+		return
+	end
 	
+	self.Humanoid:MoveTo(self.TargetPosition)
+
 	-- Jump if an obstacle is in front
 	if self:CheckForObstacles() then
 		self.Humanoid.Jump = true
 	end
-	
+
 	-- Trigger attack if within range
 	if self.Distance <= 6 then
 		self:Attack()
@@ -233,17 +244,17 @@ end
 --- Constructor: Initializes a new Zombie AI instance
 function ZombieAI.New(zombie)
 	local self = setmetatable({}, ZombieAI)
-	
+
 	self.Model = zombie
 	self.PrimaryPart = zombie.PrimaryPart
 	self.Humanoid = zombie:FindFirstChildOfClass("Humanoid")
-	self.Info = infoZombies[zombie.Name] 
-	
+	self.Info = table.clone(infoZombies[zombie.Name])
+
 	self.LastPathUpdate = 0
 	self.LastAttack = 0
 	self.CurrentHealth = self.Humanoid.Health
 	self.Animations = {}
-	
+
 	self:Setup()
 	return self
 end
@@ -251,10 +262,10 @@ end
 -- Main Update Loop (Heartbeat runs every frame on the server)
 runService.Heartbeat:Connect(function()
 	local currentTime = os.clock()
-	
+
 	for i = #AliveZombies, 1, -1 do
 		local zombie = AliveZombies[i]
-		
+
 		-- Clean up tracking table if zombie is destroyed or dead
 		if not zombie.Model or not zombie.Model.Parent or zombie.Humanoid.Health <= 0 then
 			table.remove(AliveZombies, i)
